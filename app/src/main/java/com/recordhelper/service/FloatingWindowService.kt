@@ -6,14 +6,15 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import android.view.Gravity
-import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import com.recordhelper.analyzer.VideoPageAnalyzer
 import com.recordhelper.analyzer.PublishTimeAnalyzer
 import com.recordhelper.data.RecordRepository
@@ -21,14 +22,12 @@ import com.recordhelper.data.RecordStatus
 import com.recordhelper.data.VideoRecordEntity
 import kotlinx.coroutines.*
 
-/**
- * 悬浮窗服务
- * 提供可拖动的悬浮窗，两个按钮分别触发监测和补时间流程
- */
+private const val TAG = "FloatingWindowService"
+
 class FloatingWindowService : Service() {
 
     private lateinit var windowManager: WindowManager
-    private lateinit var floatingView: View
+    private var floatingView: View? = null
     private lateinit var params: WindowManager.LayoutParams
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var repository: RecordRepository
@@ -37,13 +36,25 @@ class FloatingWindowService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        repository = RecordRepository(this)
-        setupFloatingWindow()
+        Log.d(TAG, "onCreate")
+        try {
+            windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            repository = RecordRepository(this)
+            setupFloatingWindow()
+            Log.d(TAG, "Floating window created successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create floating window", e)
+            Toast.makeText(this, "悬浮窗创建失败: ${e.message}", Toast.LENGTH_LONG).show()
+            stopSelf()
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "onStartCommand")
+        return START_STICKY
     }
 
     private fun setupFloatingWindow() {
-        // 创建悬浮窗布局
         floatingView = createFloatingLayout()
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -76,7 +87,7 @@ class FloatingWindowService : Service() {
         }
 
         statusText = TextView(this).apply {
-            text = "记录助手"
+            text = "记录助手 ✅"
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 12f
         }
@@ -104,19 +115,24 @@ class FloatingWindowService : Service() {
         var initialY = 0
         var initialTouchX = 0f
         var initialTouchY = 0f
+        var isDragging = false
 
-        floatingView.setOnTouchListener { _, event ->
+        floatingView?.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
                     initialY = params.y
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
+                    isDragging = false
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    params.x = initialX + (event.rawX - initialTouchX).toInt()
-                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    val dx = (event.rawX - initialTouchX).toInt()
+                    val dy = (event.rawY - initialTouchY).toInt()
+                    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) isDragging = true
+                    params.x = initialX + dx
+                    params.y = initialY + dy
                     windowManager.updateViewLayout(floatingView, params)
                     true
                 }
@@ -125,16 +141,13 @@ class FloatingWindowService : Service() {
         }
     }
 
-    /**
-     * 截屏记录按钮点击：截屏 → 分析 → 存储
-     */
     private fun onRecordClick() {
         scope.launch {
             statusText.text = "截屏中..."
             try {
                 val bitmap = CaptureForegroundService.instance?.captureBitmap()
                 if (bitmap == null) {
-                    statusText.text = "截屏失败"
+                    statusText.text = "截屏失败(无实例)"
                     return@launch
                 }
 
@@ -142,27 +155,26 @@ class FloatingWindowService : Service() {
                 val result = analyzer.analyze(bitmap)
 
                 if (result.isVideoPage) {
+                    val ratioTag = if (result.meetsRatioCondition) "✅比例达标" else "⚠️比例不达标"
                     val record = VideoRecordEntity(
                         merchantName = result.merchantName,
                         interactionCount = result.interactionCount,
-                        status = RecordStatus.SUCCESS
+                        status = if (result.meetsRatioCondition) RecordStatus.SUCCESS else RecordStatus.PENDING
                     )
                     repository.insert(record)
-                    statusText.text = "✅ ${result.merchantName}"
+                    statusText.text = "✅ ${result.merchantName}\n${result.interactionCount}\n$ratioTag"
                 } else {
                     statusText.text = "❌ 非视频页面"
                 }
 
                 bitmap.recycle()
             } catch (e: Exception) {
+                Log.e(TAG, "Record error", e)
                 statusText.text = "错误: ${e.message}"
             }
         }
     }
 
-    /**
-     * 补充时间按钮点击：截屏 → OCR → 解析时间 → 更新最近记录
-     */
     private fun onTimeClick() {
         scope.launch {
             statusText.text = "截屏中..."
@@ -175,9 +187,8 @@ class FloatingWindowService : Service() {
 
                 statusText.text = "识别时间..."
                 val ocrText = withContext(Dispatchers.Default) {
-                    // 简单复用 analyzer 的 OCR 能力
                     val result = analyzer.analyze(bitmap)
-                    result.merchantName // 这里需要获取完整 OCR 文本，简化处理
+                    result.ocrText
                 }
 
                 val timeResult = PublishTimeAnalyzer.analyze(ocrText)
@@ -189,15 +200,17 @@ class FloatingWindowService : Service() {
 
                 bitmap.recycle()
             } catch (e: Exception) {
+                Log.e(TAG, "Time error", e)
                 statusText.text = "错误: ${e.message}"
             }
         }
     }
 
     override fun onDestroy() {
+        Log.d(TAG, "onDestroy")
         scope.cancel()
-        if (::floatingView.isInitialized) {
-            windowManager.removeView(floatingView)
+        floatingView?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) {}
         }
         super.onDestroy()
     }
