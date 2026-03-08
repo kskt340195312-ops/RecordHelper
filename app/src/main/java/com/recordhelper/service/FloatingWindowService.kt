@@ -1,6 +1,6 @@
 package com.recordhelper.service
 
-import android.app.*
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -15,7 +15,6 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.app.NotificationCompat
 import com.recordhelper.analyzer.VideoPageAnalyzer
 import com.recordhelper.analyzer.PublishTimeAnalyzer
 import com.recordhelper.data.RecordRepository
@@ -26,11 +25,6 @@ import kotlinx.coroutines.*
 private const val TAG = "FloatingWindowService"
 
 class FloatingWindowService : Service() {
-
-    companion object {
-        private const val CHANNEL_ID = "floating_channel"
-        private const val NOTIFICATION_ID = 1002
-    }
 
     private lateinit var windowManager: WindowManager
     private var floatingView: View? = null
@@ -43,49 +37,26 @@ class FloatingWindowService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "onCreate called")
+        Toast.makeText(this, "[悬浮窗] onCreate开始", Toast.LENGTH_SHORT).show()
         try {
-            createNotificationChannel()
-            startForeground(NOTIFICATION_ID, buildNotification())
-            Log.d(TAG, "startForeground done")
-
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             repository = RecordRepository(this)
+            Log.d(TAG, "About to setup floating window")
+            Toast.makeText(this, "[悬浮窗] 准备创建窗口...", Toast.LENGTH_SHORT).show()
             setupFloatingWindow()
             Log.d(TAG, "Floating window created successfully")
-            Toast.makeText(this, "悬浮窗已启动", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "[悬浮窗] ✅ 创建成功!", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create floating window", e)
-            Toast.makeText(this, "悬浮窗创建失败: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "[悬浮窗] ❌ 创建失败: ${e.message}", Toast.LENGTH_LONG).show()
             stopSelf()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand called")
+        Toast.makeText(this, "[悬浮窗] onStartCommand", Toast.LENGTH_SHORT).show()
         return START_STICKY
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "悬浮窗服务",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "悬浮窗服务运行中"
-            }
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(channel)
-        }
-    }
-
-    private fun buildNotification(): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("记录助手")
-            .setContentText("悬浮窗运行中")
-            .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setOngoing(true)
-            .build()
     }
 
     private fun setupFloatingWindow() {
@@ -109,7 +80,9 @@ class FloatingWindowService : Service() {
             y = 200
         }
 
+        Log.d(TAG, "Adding view to WindowManager, type=$layoutType")
         windowManager.addView(floatingView, params)
+        Log.d(TAG, "View added successfully")
         setupDrag()
     }
 
@@ -184,10 +157,8 @@ class FloatingWindowService : Service() {
                     statusText.text = "截屏失败(无实例)"
                     return@launch
                 }
-
                 statusText.text = "分析中..."
                 val result = analyzer.analyze(bitmap)
-
                 if (result.isVideoPage) {
                     val ratioTag = if (result.meetsRatioCondition) "✅比例达标" else "⚠️比例不达标"
                     val record = VideoRecordEntity(
@@ -200,7 +171,6 @@ class FloatingWindowService : Service() {
                 } else {
                     statusText.text = "❌ 非视频页面"
                 }
-
                 bitmap.recycle()
             } catch (e: Exception) {
                 Log.e(TAG, "Record error", e)
@@ -218,20 +188,17 @@ class FloatingWindowService : Service() {
                     statusText.text = "截屏失败"
                     return@launch
                 }
-
                 statusText.text = "识别时间..."
                 val ocrText = withContext(Dispatchers.Default) {
                     val result = analyzer.analyze(bitmap)
                     result.ocrText
                 }
-
                 val timeResult = PublishTimeAnalyzer.analyze(ocrText)
                 if (timeResult.parsedTime.isNotEmpty()) {
                     statusText.text = "⏰ ${timeResult.parsedTime}"
                 } else {
                     statusText.text = "未识别到时间"
                 }
-
                 bitmap.recycle()
             } catch (e: Exception) {
                 Log.e(TAG, "Time error", e)

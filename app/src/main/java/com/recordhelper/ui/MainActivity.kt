@@ -39,41 +39,57 @@ class MainActivity : ComponentActivity() {
     private val mediaProjectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        Log.d(TAG, "MediaProjection result: code=${result.resultCode}, data=${result.data}")
+        Toast.makeText(this, "截屏权限回调: code=${result.resultCode}", Toast.LENGTH_SHORT).show()
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            Log.d(TAG, "MediaProjection granted")
+            Toast.makeText(this, "✅ 截屏权限已获取，正在启动服务...", Toast.LENGTH_LONG).show()
             CaptureForegroundService.setProjectionData(result.resultCode, result.data!!)
-            startCaptureService()
-            startFloatingService()
-            Toast.makeText(this, "服务已启动，可切换到其他应用", Toast.LENGTH_LONG).show()
+            try {
+                startCaptureService()
+                Toast.makeText(this, "✅ 截屏服务已启动", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start capture service", e)
+                Toast.makeText(this, "❌ 截屏服务启动失败: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+            try {
+                startFloatingService()
+                Toast.makeText(this, "✅ 悬浮窗服务已启动，请切换到抖音", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start floating service", e)
+                Toast.makeText(this, "❌ 悬浮窗服务启动失败: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         } else {
-            Log.w(TAG, "MediaProjection denied")
-            Toast.makeText(this, "需要截屏权限才能使用", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "❌ 截屏权限被拒绝", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // Step 2: 通知权限回调 → 继续请求 MediaProjection
+    // Step 2: 通知权限回调
     private val notificationPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         Log.d(TAG, "Notification permission granted: $granted")
-        // 不管通知权限是否授予，都继续请求 MediaProjection
+        Toast.makeText(this, "通知权限: $granted，继续请求截屏...", Toast.LENGTH_SHORT).show()
         requestMediaProjection()
     }
 
-    // Step 1: 悬浮窗权限回调（通过 onResume 检测）
     override fun onResume() {
         super.onResume()
-        if (pendingStart && Settings.canDrawOverlays(this)) {
-            pendingStart = false
-            Log.d(TAG, "Overlay permission granted, continuing...")
-            requestNotificationPermission()
+        if (pendingStart) {
+            val canOverlay = Settings.canDrawOverlays(this)
+            Log.d(TAG, "onResume pendingStart=true, canOverlay=$canOverlay")
+            if (canOverlay) {
+                pendingStart = false
+                Toast.makeText(this, "✅ 悬浮窗权限已获取", Toast.LENGTH_SHORT).show()
+                requestNotificationPermission()
+            } else {
+                Toast.makeText(this, "⚠️ 悬浮窗权限未授予，请授予后返回", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         repository = RecordRepository(this)
-
         setContent {
             MaterialTheme {
                 MainScreen(
@@ -85,44 +101,51 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * 启动流程：悬浮窗权限 → 通知权限 → MediaProjection → 启动服务
-     */
     private fun startFlow() {
-        Log.d(TAG, "startFlow: checking overlay permission")
-        // Step 1: 悬浮窗权限
-        if (!Settings.canDrawOverlays(this)) {
+        Toast.makeText(this, "开始启动流程...", Toast.LENGTH_SHORT).show()
+        val canOverlay = Settings.canDrawOverlays(this)
+        Toast.makeText(this, "悬浮窗权限: $canOverlay", Toast.LENGTH_SHORT).show()
+        Log.d(TAG, "startFlow: canOverlay=$canOverlay")
+
+        if (!canOverlay) {
             pendingStart = true
-            val intent = Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:$packageName")
-            )
-            startActivity(intent)
-            Toast.makeText(this, "请授予悬浮窗权限，然后返回", Toast.LENGTH_LONG).show()
+            try {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+                Toast.makeText(this, "请授予悬浮窗权限后返回此应用", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "❌ 无法打开权限设置: ${e.message}", Toast.LENGTH_LONG).show()
+            }
             return
         }
         requestNotificationPermission()
     }
 
     private fun requestNotificationPermission() {
-        // Step 2: 通知权限 (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED
             ) {
-                Log.d(TAG, "Requesting notification permission")
+                Toast.makeText(this, "请求通知权限...", Toast.LENGTH_SHORT).show()
                 notificationPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
                 return
             }
         }
+        Toast.makeText(this, "通知权限OK，请求截屏权限...", Toast.LENGTH_SHORT).show()
         requestMediaProjection()
     }
 
     private fun requestMediaProjection() {
-        // Step 3: MediaProjection
-        Log.d(TAG, "Requesting MediaProjection")
-        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjectionLauncher.launch(pm.createScreenCaptureIntent())
+        Toast.makeText(this, "请求截屏权限...", Toast.LENGTH_SHORT).show()
+        try {
+            val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjectionLauncher.launch(pm.createScreenCaptureIntent())
+        } catch (e: Exception) {
+            Toast.makeText(this, "❌ 请求截屏权限失败: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun startCaptureService() {
@@ -136,13 +159,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startFloatingService() {
-        Log.d(TAG, "Starting FloatingWindowService")
+        val canOverlay = Settings.canDrawOverlays(this)
+        Log.d(TAG, "Starting FloatingWindowService, canDrawOverlays=$canOverlay")
+        Toast.makeText(this, "启动悬浮窗服务, overlay权限=$canOverlay", Toast.LENGTH_SHORT).show()
         val intent = Intent(this, FloatingWindowService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        // 用普通 startService，不需要 foreground service type
+        startService(intent)
     }
 
     private fun stopServices() {
