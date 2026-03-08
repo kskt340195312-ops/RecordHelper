@@ -137,7 +137,12 @@ class MainActivity : ComponentActivity() {
 
     private fun startFloatingService() {
         Log.d(TAG, "Starting FloatingWindowService")
-        startService(Intent(this, FloatingWindowService::class.java))
+        val intent = Intent(this, FloatingWindowService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 
     private fun stopServices() {

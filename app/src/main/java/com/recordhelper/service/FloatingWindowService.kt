@@ -1,6 +1,6 @@
 package com.recordhelper.service
 
-import android.app.Service
+import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -15,6 +15,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.app.NotificationCompat
 import com.recordhelper.analyzer.VideoPageAnalyzer
 import com.recordhelper.analyzer.PublishTimeAnalyzer
 import com.recordhelper.data.RecordRepository
@@ -26,6 +27,11 @@ private const val TAG = "FloatingWindowService"
 
 class FloatingWindowService : Service() {
 
+    companion object {
+        private const val CHANNEL_ID = "floating_channel"
+        private const val NOTIFICATION_ID = 1002
+    }
+
     private lateinit var windowManager: WindowManager
     private var floatingView: View? = null
     private lateinit var params: WindowManager.LayoutParams
@@ -36,12 +42,17 @@ class FloatingWindowService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "onCreate")
+        Log.d(TAG, "onCreate called")
         try {
+            createNotificationChannel()
+            startForeground(NOTIFICATION_ID, buildNotification())
+            Log.d(TAG, "startForeground done")
+
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             repository = RecordRepository(this)
             setupFloatingWindow()
             Log.d(TAG, "Floating window created successfully")
+            Toast.makeText(this, "悬浮窗已启动", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create floating window", e)
             Toast.makeText(this, "悬浮窗创建失败: ${e.message}", Toast.LENGTH_LONG).show()
@@ -50,8 +61,31 @@ class FloatingWindowService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand")
+        Log.d(TAG, "onStartCommand called")
         return START_STICKY
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "悬浮窗服务",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "悬浮窗服务运行中"
+            }
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(channel)
+        }
+    }
+
+    private fun buildNotification(): Notification {
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("记录助手")
+            .setContentText("悬浮窗运行中")
+            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setOngoing(true)
+            .build()
     }
 
     private fun setupFloatingWindow() {
