@@ -4,12 +4,18 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.PixelFormat
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
+import android.view.WindowManager
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -34,56 +40,44 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var repository: RecordRepository
     private var pendingStart = false
+    private var floatingView: android.view.View? = null
 
-    // Step 3: MediaProjection 权限回调
     private val mediaProjectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        Log.d(TAG, "MediaProjection result: code=${result.resultCode}, data=${result.data}")
-        Toast.makeText(this, "截屏权限回调: code=${result.resultCode}", Toast.LENGTH_SHORT).show()
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            Toast.makeText(this, "✅ 截屏权限已获取，正在启动服务...", Toast.LENGTH_LONG).show()
             CaptureForegroundService.setProjectionData(result.resultCode, result.data!!)
             try {
-                startCaptureService()
-                Toast.makeText(this, "✅ 截屏服务已启动", Toast.LENGTH_SHORT).show()
+                val intent = Intent(this, CaptureForegroundService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start capture service", e)
-                Toast.makeText(this, "❌ 截屏服务启动失败: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "截屏服务启动失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
+            // 直接在 Activity 中创建悬浮窗，不通过 Service
             try {
-                startFloatingService()
-                Toast.makeText(this, "✅ 悬浮窗服务已启动，请切换到抖音", Toast.LENGTH_LONG).show()
+                showFloatingWindow()
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start floating service", e)
-                Toast.makeText(this, "❌ 悬浮窗服务启动失败: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "悬浮窗创建失败: ${e.message}", Toast.LENGTH_LONG).show()
+                Log.e(TAG, "showFloatingWindow failed", e)
             }
         } else {
-            Toast.makeText(this, "❌ 截屏权限被拒绝", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "需要截屏权限", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // Step 2: 通知权限回调
     private val notificationPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        Log.d(TAG, "Notification permission granted: $granted")
-        Toast.makeText(this, "通知权限: $granted，继续请求截屏...", Toast.LENGTH_SHORT).show()
-        requestMediaProjection()
-    }
+    ) { _ -> requestMediaProjection() }
 
     override fun onResume() {
         super.onResume()
-        if (pendingStart) {
-            val canOverlay = Settings.canDrawOverlays(this)
-            Log.d(TAG, "onResume pendingStart=true, canOverlay=$canOverlay")
-            if (canOverlay) {
-                pendingStart = false
-                Toast.makeText(this, "✅ 悬浮窗权限已获取", Toast.LENGTH_SHORT).show()
-                requestNotificationPermission()
-            } else {
-                Toast.makeText(this, "⚠️ 悬浮窗权限未授予，请授予后返回", Toast.LENGTH_LONG).show()
-            }
+        if (pendingStart && Settings.canDrawOverlays(this)) {
+            pendingStart = false
+            requestNotificationPermission()
         }
     }
 
@@ -95,82 +89,177 @@ class MainActivity : ComponentActivity() {
                 MainScreen(
                     repository = repository,
                     onStart = { startFlow() },
-                    onStop = { stopServices() }
+                    onStop = { stopAll() }
                 )
             }
         }
     }
 
     private fun startFlow() {
-        Toast.makeText(this, "开始启动流程...", Toast.LENGTH_SHORT).show()
-        val canOverlay = Settings.canDrawOverlays(this)
-        Toast.makeText(this, "悬浮窗权限: $canOverlay", Toast.LENGTH_SHORT).show()
-        Log.d(TAG, "startFlow: canOverlay=$canOverlay")
-
-        if (!canOverlay) {
+        if (!Settings.canDrawOverlays(this)) {
             pendingStart = true
-            try {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName")
-                )
-                startActivity(intent)
-                Toast.makeText(this, "请授予悬浮窗权限后返回此应用", Toast.LENGTH_LONG).show()
-            } catch (e: Exception) {
-                Toast.makeText(this, "❌ 无法打开权限设置: ${e.message}", Toast.LENGTH_LONG).show()
-            }
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            Toast.makeText(this, "请授予悬浮窗权限后返回", Toast.LENGTH_LONG).show()
             return
         }
         requestNotificationPermission()
     }
 
     private fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                Toast.makeText(this, "请求通知权限...", Toast.LENGTH_SHORT).show()
-                notificationPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-                return
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            return
         }
-        Toast.makeText(this, "通知权限OK，请求截屏权限...", Toast.LENGTH_SHORT).show()
         requestMediaProjection()
     }
 
     private fun requestMediaProjection() {
-        Toast.makeText(this, "请求截屏权限...", Toast.LENGTH_SHORT).show()
-        try {
-            val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            mediaProjectionLauncher.launch(pm.createScreenCaptureIntent())
-        } catch (e: Exception) {
-            Toast.makeText(this, "❌ 请求截屏权限失败: ${e.message}", Toast.LENGTH_LONG).show()
+        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        mediaProjectionLauncher.launch(pm.createScreenCaptureIntent())
+    }
+
+    /**
+     * 直接在 Activity 中创建悬浮窗
+     * 不依赖 Service，确保悬浮窗一定能显示
+     */
+    private fun showFloatingWindow() {
+        if (floatingView != null) return // 已经显示了
+
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            layoutType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 300
         }
-    }
 
-    private fun startCaptureService() {
-        Log.d(TAG, "Starting CaptureForegroundService")
-        val intent = Intent(this, CaptureForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xEE333333.toInt())
+            setPadding(30, 20, 30, 20)
         }
+
+        val statusTv = TextView(this).apply {
+            text = "记录助手 ✅"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 14f
+        }
+        layout.addView(statusTv)
+
+        val btnRecord = Button(this).apply {
+            text = "📷 截屏记录"
+            textSize = 13f
+        }
+        layout.addView(btnRecord)
+
+        val btnTime = Button(this).apply {
+            text = "⏰ 补充时间"
+            textSize = 13f
+        }
+        layout.addView(btnTime)
+
+        // 拖拽支持
+        var initialX = 0; var initialY = 0
+        var initialTouchX = 0f; var initialTouchY = 0f
+        layout.setOnTouchListener { _, event ->
+            when (event.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x; initialY = params.y
+                    initialTouchX = event.rawX; initialTouchY = event.rawY
+                    true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    params.x = initialX + (event.rawX - initialTouchX).toInt()
+                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    wm.updateViewLayout(layout, params)
+                    true
+                }
+                else -> false
+            }
+        }
+
+        // 截屏记录按钮
+        btnRecord.setOnClickListener {
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                statusTv.text = "截屏中..."
+                try {
+                    val bitmap = CaptureForegroundService.instance?.captureBitmap()
+                    if (bitmap == null) {
+                        statusTv.text = "截屏失败"
+                        return@launch
+                    }
+                    statusTv.text = "分析中..."
+                    val analyzer = com.recordhelper.analyzer.VideoPageAnalyzer()
+                    val result = analyzer.analyze(bitmap)
+                    if (result.isVideoPage) {
+                        val ratioTag = if (result.meetsRatioCondition) "✅达标" else "⚠️不达标"
+                        val record = VideoRecordEntity(
+                            merchantName = result.merchantName,
+                            interactionCount = result.interactionCount,
+                            status = if (result.meetsRatioCondition)
+                                com.recordhelper.data.RecordStatus.SUCCESS
+                            else com.recordhelper.data.RecordStatus.PENDING
+                        )
+                        repository.insert(record)
+                        statusTv.text = "✅${result.merchantName}\n${result.interactionCount}\n$ratioTag"
+                    } else {
+                        statusTv.text = "❌非视频页"
+                    }
+                    bitmap.recycle()
+                } catch (e: Exception) {
+                    statusTv.text = "错误:${e.message}"
+                }
+            }
+        }
+
+        // 补充时间按钮
+        btnTime.setOnClickListener {
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                statusTv.text = "截屏中..."
+                try {
+                    val bitmap = CaptureForegroundService.instance?.captureBitmap()
+                    if (bitmap == null) { statusTv.text = "截屏失败"; return@launch }
+                    statusTv.text = "识别时间..."
+                    val analyzer = com.recordhelper.analyzer.VideoPageAnalyzer()
+                    val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                        analyzer.analyze(bitmap)
+                    }
+                    val timeResult = com.recordhelper.analyzer.PublishTimeAnalyzer.analyze(result.ocrText)
+                    statusTv.text = if (timeResult.parsedTime.isNotEmpty()) "⏰${timeResult.parsedTime}" else "未识别到时间"
+                    bitmap.recycle()
+                } catch (e: Exception) { statusTv.text = "错误:${e.message}" }
+            }
+        }
+
+        wm.addView(layout, params)
+        floatingView = layout
+        Toast.makeText(this, "悬浮窗已显示，可切换到抖音", Toast.LENGTH_LONG).show()
     }
 
-    private fun startFloatingService() {
-        val canOverlay = Settings.canDrawOverlays(this)
-        Log.d(TAG, "Starting FloatingWindowService, canDrawOverlays=$canOverlay")
-        Toast.makeText(this, "启动悬浮窗服务, overlay权限=$canOverlay", Toast.LENGTH_SHORT).show()
-        val intent = Intent(this, FloatingWindowService::class.java)
-        // 用普通 startService，不需要 foreground service type
-        startService(intent)
-    }
-
-    private fun stopServices() {
-        stopService(Intent(this, FloatingWindowService::class.java))
-        stopService(Intent(this, CaptureForegroundService::class.java))
-        Toast.makeText(this, "服务已停止", Toast.LENGTH_SHORT).show()
+    private fun stopAll() {
+        floatingView?.let {
+            try {
+                (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(it)
+            } catch (_: Exception) {}
+            floatingView = null
+        }
+        try { stopService(Intent(this, FloatingWindowService::class.java)) } catch (_: Exception) {}
+        try { stopService(Intent(this, CaptureForegroundService::class.java)) } catch (_: Exception) {}
+        Toast.makeText(this, "已停止", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -221,11 +310,9 @@ fun MainScreen(
                     Text("导出 Excel")
                 }
             }
-
             Spacer(modifier = Modifier.height(16.dp))
             Text("共 ${records.size} 条记录", style = MaterialTheme.typography.bodyMedium)
             Spacer(modifier = Modifier.height(8.dp))
-
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(records) { record -> RecordCard(record) }
             }
@@ -237,15 +324,9 @@ fun MainScreen(
 fun RecordCard(record: VideoRecordEntity) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(
-                text = record.merchantName.ifEmpty { "未知商家" },
-                style = MaterialTheme.typography.titleSmall
-            )
+            Text(record.merchantName.ifEmpty { "未知商家" }, style = MaterialTheme.typography.titleSmall)
             Spacer(modifier = Modifier.height(4.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("互动: ${record.interactionCount}", style = MaterialTheme.typography.bodySmall)
                 Text(record.analyzedPublishTime.ifEmpty { "时间未知" }, style = MaterialTheme.typography.bodySmall)
             }
@@ -253,9 +334,7 @@ fun RecordCard(record: VideoRecordEntity) {
                 text = record.status.name,
                 style = MaterialTheme.typography.labelSmall,
                 color = if (record.status == com.recordhelper.data.RecordStatus.SUCCESS)
-                    MaterialTheme.colorScheme.primary
-                else
-                    MaterialTheme.colorScheme.error
+                    MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
             )
         }
     }
