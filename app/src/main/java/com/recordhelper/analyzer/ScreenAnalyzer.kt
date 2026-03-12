@@ -1,7 +1,5 @@
 package com.recordhelper.analyzer
 
-import android.graphics.Bitmap
-import android.graphics.Color
 import android.util.Log
 
 private const val TAG = "ScreenAnalyzer"
@@ -15,87 +13,129 @@ data class AnalyzeResult(
     val shareCount: Long = 0,
     val isBeijing: Boolean = false,
     val meetsAllConditions: Boolean = false,
-    val ocrText: String = ""
+    val debugInfo: String = ""
 )
 
 class ScreenAnalyzer {
 
     /**
-     * 分析无障碍服务获取的屏幕文本节点
-     * @param nodeTexts 屏幕上所有文本节点的内容列表
+     * 分析无障碍服务获取的屏幕节点信息
+     * @param nodeInfos 屏幕上所有节点的 (text, contentDescription) 对
      * @param ratioPercent 比例条件百分比 (20/30/40/50)
      * @param minComments 最低评论数
      */
-    fun analyzeFromTexts(
-        nodeTexts: List<String>,
+    fun analyzeFromNodes(
+        nodeInfos: List<NodeData>,
         ratioPercent: Int,
         minComments: Int
     ): AnalyzeResult {
-        val fullText = nodeTexts.joinToString("\n")
-        Log.d(TAG, "Analyzing texts: $fullText")
-
-        // 检测北京地区
-        val isBeijing = nodeTexts.any { it.contains("北京") }
-
-        // 检测绿标/团购相关
-        // 抖音团购视频通常有: "优惠团购"、"已售XX万+"、"免预约" 等文字
-        val hasGroupBuy = nodeTexts.any {
-            it.contains("团购") || it.contains("已售") ||
-            it.contains("免预约") || it.contains("优惠") ||
-            it.contains("到店") || it.contains("券")
+        val allTexts = nodeInfos.flatMap {
+            listOfNotNull(it.text, it.contentDesc)
         }
+        val allDescs = nodeInfos.mapNotNull { it.contentDesc }
 
-        // 提取互动数据
-        // 抖音右侧栏从上到下: 点赞、评论、收藏、转发
+        Log.d(TAG, "=== Screen Analysis ===")
+        Log.d(TAG, "All texts: $allTexts")
+
+        // === 条件1: 检测北京地区 ===
+        // 抖音团购视频底部会显示 "北京市｜xxx" 格式的地址
+        val isBeijing = allTexts.any {
+            it.contains("北京市") || it.contains("北京·")
+        }
+        Log.d(TAG, "isBeijing=$isBeijing")
+
+        // === 条件2: 检测团购/绿标 ===
+        // 抖音团购视频特征：底部有 "已售XX万+" 和商家名称带地址
+        // 绿标 = 有定位图标 + 商家信息
+        // contentDescription 中可能有 "团购" "已售" 等
+        val hasGroupBuy = allTexts.any { text ->
+            // 严格匹配：必须包含"已售"或"团购"
+            text.contains("已售") || text.contains("团购")
+        }
+        Log.d(TAG, "hasGroupBuy=$hasGroupBuy")
+
+        // === 提取互动数据 ===
+        // 抖音无障碍节点中，互动按钮的 contentDescription 格式通常是:
+        // "赞 9500" / "评论 23" / "收藏 201" / "转发 1000"
+        // 或者 "点赞，9500" / "9500赞"
         var likeCount = 0L
         var commentCount = 0L
         var favoriteCount = 0L
         var shareCount = 0L
 
-        for (text in nodeTexts) {
-            val num = CountParser.parseLong(text)
-            // 纯数字或带万的文本，根据上下文判断
-            if (num > 0) {
-                // 尝试根据相邻文本或特征判断
-                when {
-                    text.contains("赞") || text.contains("喜欢") -> likeCount = num
-                    text.contains("评论") -> commentCount = num
-                    text.contains("收藏") -> favoriteCount = num
-                    text.contains("转发") || text.contains("分享") -> shareCount = num
+        for (desc in allDescs) {
+            val lower = desc.lowercase()
+            when {
+                (lower.contains("赞") || lower.contains("喜欢") || lower.contains("like"))
+                    && !lower.contains("评") && !lower.contains("收") -> {
+                    val n = CountParser.parseLong(desc)
+                    if (n > 0) likeCount = n
+                }
+                lower.contains("评论") || lower.contains("comment") -> {
+                    val n = CountParser.parseLong(desc)
+                    if (n > 0) commentCount = n
+                }
+                lower.contains("收藏") || lower.contains("favorite") -> {
+                    val n = CountParser.parseLong(desc)
+                    if (n > 0) favoriteCount = n
+                }
+                (lower.contains("转发") || lower.contains("分享") || lower.contains("share"))
+                    && !lower.contains("收") -> {
+                    val n = CountParser.parseLong(desc)
+                    if (n > 0) shareCount = n
                 }
             }
         }
 
-        // 如果没有通过关键词匹配到，尝试按位置顺序解析纯数字
-        // 无障碍服务获取的节点通常有 content-description
-        if (likeCount == 0L || commentCount == 0L) {
-            val numbers = nodeTexts.mapNotNull { text ->
-                val n = CountParser.parseLong(text)
-                if (n > 0 && Regex("^[\\d.万wW,]+$").matches(text.trim())) n else null
-            }
-            // 抖音右侧栏顺序: 点赞、评论、收藏、转发
-            if (numbers.size >= 2) {
-                if (likeCount == 0L) likeCount = numbers.getOrElse(0) { 0 }
-                if (commentCount == 0L) commentCount = numbers.getOrElse(1) { 0 }
-                if (favoriteCount == 0L) favoriteCount = numbers.getOrElse(2) { 0 }
-                if (shareCount == 0L) shareCount = numbers.getOrElse(3) { 0 }
+        // 也从 text 中尝试提取（有些版本数据在 text 里）
+        for (info in nodeInfos) {
+            val text = info.text ?: continue
+            val lower = text.lowercase()
+            when {
+                (lower.contains("赞") || lower.contains("喜欢"))
+                    && !lower.contains("评") && !lower.contains("收") && likeCount == 0L -> {
+                    val n = CountParser.parseLong(text)
+                    if (n > 0) likeCount = n
+                }
+                lower.contains("评论") && commentCount == 0L -> {
+                    val n = CountParser.parseLong(text)
+                    if (n > 0) commentCount = n
+                }
+                lower.contains("收藏") && favoriteCount == 0L -> {
+                    val n = CountParser.parseLong(text)
+                    if (n > 0) favoriteCount = n
+                }
+                (lower.contains("转发") || lower.contains("分享")) && shareCount == 0L -> {
+                    val n = CountParser.parseLong(text)
+                    if (n > 0) shareCount = n
+                }
             }
         }
 
-        // 评论数条件
+        Log.d(TAG, "Counts: like=$likeCount, comment=$commentCount, fav=$favoriteCount, share=$shareCount")
+
+        // === 条件3: 评论数 ===
         val meetsComments = commentCount >= minComments
+        Log.d(TAG, "meetsComments=$meetsComments (need>=$minComments, got=$commentCount)")
 
-        // 比例条件: min(like/share, share/like) >= ratioPercent%
+        // === 条件4: 比例条件 ===
         val meetsRatio = checkRatio(likeCount, shareCount, ratioPercent)
+        Log.d(TAG, "meetsRatio=$meetsRatio (ratio=$ratioPercent%)")
 
+        // 所有条件必须同时满足
         val meetsAll = isBeijing && hasGroupBuy && meetsComments && meetsRatio
 
-        Log.d(TAG, "Result: beijing=$isBeijing, groupBuy=$hasGroupBuy, " +
-            "like=$likeCount, comment=$commentCount, fav=$favoriteCount, share=$shareCount, " +
-            "meetsComments=$meetsComments, meetsRatio=$meetsRatio, meetsAll=$meetsAll")
+        val debug = buildString {
+            appendLine("北京=$isBeijing, 团购=$hasGroupBuy")
+            appendLine("赞=$likeCount, 评=$commentCount, 藏=$favoriteCount, 转=$shareCount")
+            appendLine("评论>=$minComments: $meetsComments")
+            appendLine("比例>=${ratioPercent}%: $meetsRatio")
+            appendLine("总判定: $meetsAll")
+        }
+        Log.d(TAG, "=== Result: meetsAll=$meetsAll ===")
 
         return AnalyzeResult(
-            hasGreenIcon = isBeijing && hasGroupBuy, // 绿标通常伴随地区+团购
+            hasGreenIcon = hasGroupBuy && isBeijing,
             hasGroupBuyDot = hasGroupBuy,
             likeCount = likeCount,
             commentCount = commentCount,
@@ -103,21 +143,21 @@ class ScreenAnalyzer {
             shareCount = shareCount,
             isBeijing = isBeijing,
             meetsAllConditions = meetsAll,
-            ocrText = fullText
+            debugInfo = debug
         )
     }
 
-    /**
-     * 检查点赞/转发比例
-     * share/like 或 like/share >= ratioPercent%
-     */
     private fun checkRatio(like: Long, share: Long, ratioPercent: Int): Boolean {
         if (like == 0L || share == 0L) return false
-        val ratio = if (share > like) {
-            like.toDouble() / share.toDouble()
-        } else {
-            share.toDouble() / like.toDouble()
-        }
+        val smaller = minOf(like, share).toDouble()
+        val larger = maxOf(like, share).toDouble()
+        val ratio = smaller / larger
         return ratio >= ratioPercent / 100.0
     }
 }
+
+data class NodeData(
+    val text: String?,
+    val contentDesc: String?,
+    val className: String? = null
+)

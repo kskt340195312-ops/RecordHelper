@@ -7,23 +7,22 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.recordhelper.data.AppSettings
 import com.recordhelper.service.DouyinAutoService
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            MaterialTheme {
-                MainScreen()
-            }
-        }
+        setContent { MaterialTheme { MainScreen() } }
     }
 }
 
@@ -44,98 +43,67 @@ fun MainScreen() {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 无障碍服务状态
-            val serviceConnected = DouyinAutoService.instance != null
+            val serviceOk = DouyinAutoService.instance != null
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = if (serviceConnected) "✅ 无障碍服务已连接" else "❌ 无障碍服务未开启",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    if (!serviceConnected) {
-                        Spacer(modifier = Modifier.height(8.dp))
+                    Text(if (serviceOk) "✅ 无障碍服务已连接" else "❌ 无障碍服务未开启",
+                        style = MaterialTheme.typography.titleMedium)
+                    if (!serviceOk) {
+                        Spacer(Modifier.height(8.dp))
                         Button(onClick = {
                             context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                             Toast.makeText(context, "请找到「记录助手」并开启", Toast.LENGTH_LONG).show()
-                        }) {
-                            Text("去开启无障碍服务")
-                        }
+                        }) { Text("去开启无障碍服务") }
                     }
                 }
             }
 
-            // 筛选条件设置
+            // 筛选条件
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("筛选条件", style = MaterialTheme.typography.titleMedium)
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // 比例条件
+                    Spacer(Modifier.height(8.dp))
                     Text("点赞/转发比例 ≥")
-                    ExposedDropdownMenuBox(
-                        expanded = ratioExpanded,
-                        onExpandedChange = { ratioExpanded = it }
-                    ) {
+                    ExposedDropdownMenuBox(expanded = ratioExpanded, onExpandedChange = { ratioExpanded = it }) {
                         OutlinedTextField(
-                            value = "${ratioPercent}%",
-                            onValueChange = {},
-                            readOnly = true,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = ratioExpanded) },
+                            value = "${ratioPercent}%", onValueChange = {}, readOnly = true,
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(ratioExpanded) },
                             modifier = Modifier.menuAnchor().fillMaxWidth()
                         )
-                        ExposedDropdownMenu(
-                            expanded = ratioExpanded,
-                            onDismissRequest = { ratioExpanded = false }
-                        ) {
-                            ratioOptions.forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text("${option}%") },
-                                    onClick = {
-                                        ratioPercent = option
-                                        AppSettings.setRatioPercent(context, option)
-                                        ratioExpanded = false
-                                    }
-                                )
+                        ExposedDropdownMenu(expanded = ratioExpanded, onDismissRequest = { ratioExpanded = false }) {
+                            ratioOptions.forEach { opt ->
+                                DropdownMenuItem(text = { Text("${opt}%") }, onClick = {
+                                    ratioPercent = opt; AppSettings.setRatioPercent(context, opt); ratioExpanded = false
+                                })
                             }
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(Modifier.height(8.dp))
                     Text("最低评论数: $minComments")
                     Slider(
                         value = minComments.toFloat(),
-                        onValueChange = {
-                            minComments = it.toInt()
-                            AppSettings.setMinComments(context, minComments)
-                        },
-                        valueRange = 5f..100f,
-                        steps = 18
+                        onValueChange = { minComments = it.toInt(); AppSettings.setMinComments(context, minComments) },
+                        valueRange = 5f..100f, steps = 18
                     )
-
-                    Spacer(modifier = Modifier.height(8.dp))
                     Text("地区: 北京（固定）", style = MaterialTheme.typography.bodySmall)
-                    Text("团购标识: 自动检测", style = MaterialTheme.typography.bodySmall)
+                    Text("需要: 团购标识(已售/团购) + 北京地区 + 评论数 + 比例", style = MaterialTheme.typography.bodySmall)
                 }
             }
 
-            // 启动/停止按钮
+            // 启动按钮
             Button(
                 onClick = {
-                    val service = DouyinAutoService.instance
-                    if (service == null) {
+                    val svc = DouyinAutoService.instance
+                    if (svc == null) {
                         Toast.makeText(context, "请先开启无障碍服务", Toast.LENGTH_SHORT).show()
                         return@Button
                     }
-                    if (isRunning) {
-                        service.stopAutoScroll()
-                        isRunning = false
-                    } else {
-                        service.startAutoScroll()
-                        isRunning = true
-                    }
+                    if (isRunning) { svc.stopAutoScroll(); isRunning = false }
+                    else { svc.startAutoScroll(); isRunning = true }
                 },
                 modifier = Modifier.fillMaxWidth().height(56.dp),
                 colors = ButtonDefaults.buttonColors(
@@ -143,19 +111,14 @@ fun MainScreen() {
                     else MaterialTheme.colorScheme.primary
                 )
             ) {
-                Text(
-                    if (isRunning) "⏹ 停止自动刷" else "▶ 开始自动刷抖音",
-                    style = MaterialTheme.typography.titleMedium
-                )
+                Text(if (isRunning) "⏹ 停止" else "▶ 开始自动刷抖音",
+                    style = MaterialTheme.typography.titleMedium)
             }
 
-            // 统计
-            if (isRunning || DouyinAutoService.savedCount > 0) {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
+            // 统计 + 调试信息
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("${DouyinAutoService.savedCount}", style = MaterialTheme.typography.headlineMedium)
                             Text("已保存", style = MaterialTheme.typography.bodySmall)
@@ -165,15 +128,16 @@ fun MainScreen() {
                             Text("已跳过", style = MaterialTheme.typography.bodySmall)
                         }
                     }
+                    if (DouyinAutoService.lastDebugInfo.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("最近分析:", style = MaterialTheme.typography.labelSmall)
+                        Text(DouyinAutoService.lastDebugInfo, fontSize = 10.sp)
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.weight(1f))
-            Text(
-                "截图保存在: 相册 > RecordHelper 文件夹",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Text("截图保存在: 相册 > RecordHelper", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
