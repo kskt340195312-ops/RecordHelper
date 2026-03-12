@@ -1,7 +1,6 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("com.google.devtools.ksp") version "1.9.20-1.0.14"
 }
 
 android {
@@ -12,8 +11,8 @@ android {
         applicationId = "com.recordhelper"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
     }
 
     buildFeatures {
@@ -42,24 +41,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.8.2")
 
-    // Room
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    ksp("androidx.room:room-compiler:2.6.1")
-
-    // ML Kit 中文 OCR
-    implementation("com.google.mlkit:text-recognition-chinese:16.0.0")
-
-    // Apache POI (Excel 导出)
-    implementation("org.apache.poi:poi-ooxml:5.2.5")
-
-    // Coroutines
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-
-    // Material Components (for XML theme)
-    implementation("com.google.android.material:material:1.11.0")
-
     // Core
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+
+    // Material Components (for XML theme)
+    implementation("com.google.android.material:material:1.11.0")
 }

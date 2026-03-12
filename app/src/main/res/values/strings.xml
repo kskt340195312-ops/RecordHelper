@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">记录助手</string>
+    <string name="accessibility_service_description">自动浏览抖音视频，识别符合条件的团购视频并截图保存。需要读取屏幕内容和执行滑动手势。</string>
+</resources>
