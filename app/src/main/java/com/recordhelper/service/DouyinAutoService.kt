@@ -114,7 +114,6 @@ class DouyinAutoService : AccessibilityService() {
                     handler.post {
                         Toast.makeText(this, "✅ 发现符合条件的视频!", Toast.LENGTH_SHORT).show()
                     }
-                    // 重新截图保存（因为分析用的那张已经recycle了）
                     takeScreenshotAndSave {
                         savedCount++
                         swipeToNext {
@@ -128,6 +127,7 @@ class DouyinAutoService : AccessibilityService() {
                     swipeToNext {
                         isProcessing = false
                         if (isWorking) handler.postDelayed({ processCurrentScreen() }, 2000)
+                    }
                 }
             }
         } catch (e: Exception) {
