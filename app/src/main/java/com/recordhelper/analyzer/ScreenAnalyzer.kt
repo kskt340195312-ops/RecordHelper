@@ -1,12 +1,14 @@
 package com.recordhelper.analyzer
 
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.util.Log
 
 private const val TAG = "ScreenAnalyzer"
 
 data class AnalyzeResult(
     val hasGreenIcon: Boolean = false,
-    val hasGroupBuyDot: Boolean = false,
+    val hasOrangeDot: Boolean = false,
     val likeCount: Long = 0,
     val commentCount: Long = 0,
     val favoriteCount: Long = 0,
@@ -16,48 +18,44 @@ data class AnalyzeResult(
     val debugInfo: String = ""
 )
 
+data class NodeData(
+    val text: String?,
+    val contentDesc: String?,
+    val className: String? = null
+)
+
 class ScreenAnalyzer {
 
     /**
-     * 分析无障碍服务获取的屏幕节点信息
-     * @param nodeInfos 屏幕上所有节点的 (text, contentDescription) 对
-     * @param ratioPercent 比例条件百分比 (20/30/40/50)
+     * 完整分析：文本节点 + 截图像素
+     * @param nodeInfos 无障碍服务获取的节点数据
+     * @param bitmap 截图（用于检测绿标和小圆点）
+     * @param ratioPercent 比例条件
      * @param minComments 最低评论数
      */
-    fun analyzeFromNodes(
+    fun analyze(
         nodeInfos: List<NodeData>,
+        bitmap: Bitmap?,
         ratioPercent: Int,
         minComments: Int
     ): AnalyzeResult {
-        val allTexts = nodeInfos.flatMap {
-            listOfNotNull(it.text, it.contentDesc)
-        }
+        val allTexts = nodeInfos.flatMap { listOfNotNull(it.text, it.contentDesc) }
         val allDescs = nodeInfos.mapNotNull { it.contentDesc }
 
-        Log.d(TAG, "=== Screen Analysis ===")
-        Log.d(TAG, "All texts: $allTexts")
+        // === 条件1: 绿标（绿色定位图标）===
+        // 通过截图像素检测，绿标在屏幕左下区域
+        val hasGreenIcon = if (bitmap != null) detectGreenIcon(bitmap) else false
 
-        // === 条件1: 检测北京地区 ===
-        // 抖音团购视频底部会显示 "北京市｜xxx" 格式的地址
+        // === 条件2: 小圆点（团购链接标识）===
+        // 橙色/红色小圆点，在右侧收藏星标附近
+        val hasOrangeDot = if (bitmap != null) detectOrangeDot(bitmap) else false
+
+        // === 条件3: 北京地区 ===
         val isBeijing = allTexts.any {
-            it.contains("北京市") || it.contains("北京·")
+            it.contains("北京市") || it.contains("北京·") || it.contains("北京 ")
         }
-        Log.d(TAG, "isBeijing=$isBeijing")
-
-        // === 条件2: 检测团购/绿标 ===
-        // 抖音团购视频特征：底部有 "已售XX万+" 和商家名称带地址
-        // 绿标 = 有定位图标 + 商家信息
-        // contentDescription 中可能有 "团购" "已售" 等
-        val hasGroupBuy = allTexts.any { text ->
-            // 严格匹配：必须包含"已售"或"团购"
-            text.contains("已售") || text.contains("团购")
-        }
-        Log.d(TAG, "hasGroupBuy=$hasGroupBuy")
 
         // === 提取互动数据 ===
-        // 抖音无障碍节点中，互动按钮的 contentDescription 格式通常是:
-        // "赞 9500" / "评论 23" / "收藏 201" / "转发 1000"
-        // 或者 "点赞，9500" / "9500赞"
         var likeCount = 0L
         var commentCount = 0L
         var favoriteCount = 0L
@@ -86,57 +84,48 @@ class ScreenAnalyzer {
                 }
             }
         }
-
-        // 也从 text 中尝试提取（有些版本数据在 text 里）
+        // 也从 text 中提取
         for (info in nodeInfos) {
             val text = info.text ?: continue
             val lower = text.lowercase()
             when {
                 (lower.contains("赞") || lower.contains("喜欢"))
                     && !lower.contains("评") && !lower.contains("收") && likeCount == 0L -> {
-                    val n = CountParser.parseLong(text)
-                    if (n > 0) likeCount = n
+                    val n = CountParser.parseLong(text); if (n > 0) likeCount = n
                 }
                 lower.contains("评论") && commentCount == 0L -> {
-                    val n = CountParser.parseLong(text)
-                    if (n > 0) commentCount = n
+                    val n = CountParser.parseLong(text); if (n > 0) commentCount = n
                 }
                 lower.contains("收藏") && favoriteCount == 0L -> {
-                    val n = CountParser.parseLong(text)
-                    if (n > 0) favoriteCount = n
+                    val n = CountParser.parseLong(text); if (n > 0) favoriteCount = n
                 }
                 (lower.contains("转发") || lower.contains("分享")) && shareCount == 0L -> {
-                    val n = CountParser.parseLong(text)
-                    if (n > 0) shareCount = n
+                    val n = CountParser.parseLong(text); if (n > 0) shareCount = n
                 }
             }
         }
 
-        Log.d(TAG, "Counts: like=$likeCount, comment=$commentCount, fav=$favoriteCount, share=$shareCount")
-
-        // === 条件3: 评论数 ===
+        // === 条件4: 评论数 ===
         val meetsComments = commentCount >= minComments
-        Log.d(TAG, "meetsComments=$meetsComments (need>=$minComments, got=$commentCount)")
 
-        // === 条件4: 比例条件 ===
+        // === 条件5: 比例条件 ===
         val meetsRatio = checkRatio(likeCount, shareCount, ratioPercent)
-        Log.d(TAG, "meetsRatio=$meetsRatio (ratio=$ratioPercent%)")
 
-        // 所有条件必须同时满足
-        val meetsAll = isBeijing && hasGroupBuy && meetsComments && meetsRatio
+        // 全部5个条件必须同时满足
+        val meetsAll = hasGreenIcon && hasOrangeDot && isBeijing && meetsComments && meetsRatio
 
         val debug = buildString {
-            appendLine("北京=$isBeijing, 团购=$hasGroupBuy")
+            appendLine("绿标=$hasGreenIcon, 小圆点=$hasOrangeDot, 北京=$isBeijing")
             appendLine("赞=$likeCount, 评=$commentCount, 藏=$favoriteCount, 转=$shareCount")
             appendLine("评论>=$minComments: $meetsComments")
             appendLine("比例>=${ratioPercent}%: $meetsRatio")
             appendLine("总判定: $meetsAll")
         }
-        Log.d(TAG, "=== Result: meetsAll=$meetsAll ===")
+        Log.d(TAG, debug)
 
         return AnalyzeResult(
-            hasGreenIcon = hasGroupBuy && isBeijing,
-            hasGroupBuyDot = hasGroupBuy,
+            hasGreenIcon = hasGreenIcon,
+            hasOrangeDot = hasOrangeDot,
             likeCount = likeCount,
             commentCount = commentCount,
             favoriteCount = favoriteCount,
@@ -147,17 +136,71 @@ class ScreenAnalyzer {
         )
     }
 
+    /**
+     * 检测绿标（绿色定位图标）
+     * 位置：屏幕左下区域（x: 0~40%, y: 65%~85%）
+     * 颜色：绿色 (G > 150, G > R+50, G > B+50)
+     */
+    private fun detectGreenIcon(bitmap: Bitmap): Boolean {
+        val w = bitmap.width
+        val h = bitmap.height
+        val scanX = (w * 0.35).toInt()
+        val scanYStart = (h * 0.65).toInt()
+        val scanYEnd = (h * 0.85).toInt()
+        var greenCount = 0
+
+        for (x in 0 until scanX step 3) {
+            for (y in scanYStart until scanYEnd step 3) {
+                val pixel = bitmap.getPixel(x, y)
+                val r = Color.red(pixel)
+                val g = Color.green(pixel)
+                val b = Color.blue(pixel)
+                // 绿色：G通道高，明显大于R和B
+                if (g > 150 && g > r + 40 && g > b + 40) {
+                    greenCount++
+                }
+            }
+        }
+        Log.d(TAG, "Green pixels: $greenCount")
+        // 绿标图标大约有30+个绿色像素（采样后）
+        return greenCount > 20
+    }
+
+    /**
+     * 检测小圆点（团购链接标识）
+     * 位置：屏幕右侧互动栏区域（x: 80%~100%, y: 40%~75%）
+     * 颜色：橙色/红色小圆点 (R > 200, G: 50~150, B < 80)
+     * 小圆点很小，只需要检测到少量像素即可
+     */
+    private fun detectOrangeDot(bitmap: Bitmap): Boolean {
+        val w = bitmap.width
+        val h = bitmap.height
+        val scanXStart = (w * 0.80).toInt()
+        val scanYStart = (h * 0.40).toInt()
+        val scanYEnd = (h * 0.75).toInt()
+        var orangeCount = 0
+
+        for (x in scanXStart until w step 2) {
+            for (y in scanYStart until scanYEnd step 2) {
+                val pixel = bitmap.getPixel(x, y)
+                val r = Color.red(pixel)
+                val g = Color.green(pixel)
+                val b = Color.blue(pixel)
+                // 橙色/红色小圆点
+                if (r > 200 && g in 40..160 && b < 100) {
+                    orangeCount++
+                }
+            }
+        }
+        Log.d(TAG, "Orange dot pixels: $orangeCount")
+        // 小圆点很小，5个以上采样像素就算检测到
+        return orangeCount in 5..500
+    }
+
     private fun checkRatio(like: Long, share: Long, ratioPercent: Int): Boolean {
         if (like == 0L || share == 0L) return false
         val smaller = minOf(like, share).toDouble()
         val larger = maxOf(like, share).toDouble()
-        val ratio = smaller / larger
-        return ratio >= ratioPercent / 100.0
+        return (smaller / larger) >= ratioPercent / 100.0
     }
 }
-
-data class NodeData(
-    val text: String?,
-    val contentDesc: String?,
-    val className: String? = null
-)

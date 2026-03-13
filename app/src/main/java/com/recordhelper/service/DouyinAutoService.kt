@@ -89,7 +89,7 @@ class DouyinAutoService : AccessibilityService() {
         isProcessing = true
 
         try {
-            // 1. 收集屏幕节点数据（结构化）
+            // 1. 收集屏幕文本节点
             val nodeInfos = collectScreenNodes()
             Log.d(TAG, "Collected ${nodeInfos.size} nodes")
 
@@ -99,35 +99,35 @@ class DouyinAutoService : AccessibilityService() {
                 return
             }
 
-            // 打印所有节点用于调试
-            nodeInfos.forEachIndexed { i, n ->
-                Log.d(TAG, "Node[$i] text=${n.text}, desc=${n.contentDesc}, class=${n.className}")
-            }
+            // 2. 先截图用于像素分析（检测绿标和小圆点）
+            captureForAnalysis { bitmap ->
+                val ratioPercent = AppSettings.getRatioPercent(this)
+                val minComments = AppSettings.getMinComments(this)
 
-            // 2. 分析
-            val ratioPercent = AppSettings.getRatioPercent(this)
-            val minComments = AppSettings.getMinComments(this)
-            val result = analyzer.analyzeFromNodes(nodeInfos, ratioPercent, minComments)
-            lastDebugInfo = result.debugInfo
+                // 3. 综合分析：文本 + 像素
+                val result = analyzer.analyze(nodeInfos, bitmap, ratioPercent, minComments)
+                lastDebugInfo = result.debugInfo
+                bitmap?.recycle()
 
-            if (result.meetsAllConditions) {
-                Log.d(TAG, "✅ MATCH! Taking screenshot")
-                handler.post {
-                    Toast.makeText(this, "✅ 发现符合条件的视频!", Toast.LENGTH_SHORT).show()
-                }
-                takeScreenshotAndSave {
-                    savedCount++
+                if (result.meetsAllConditions) {
+                    Log.d(TAG, "✅ MATCH! Saving screenshot")
+                    handler.post {
+                        Toast.makeText(this, "✅ 发现符合条件的视频!", Toast.LENGTH_SHORT).show()
+                    }
+                    // 重新截图保存（因为分析用的那张已经recycle了）
+                    takeScreenshotAndSave {
+                        savedCount++
+                        swipeToNext {
+                            isProcessing = false
+                            if (isWorking) handler.postDelayed({ processCurrentScreen() }, 3000)
+                        }
+                    }
+                } else {
+                    skippedCount++
+                    Log.d(TAG, "❌ Skip #$skippedCount")
                     swipeToNext {
                         isProcessing = false
-                        if (isWorking) handler.postDelayed({ processCurrentScreen() }, 3000)
-                    }
-                }
-            } else {
-                skippedCount++
-                Log.d(TAG, "❌ Skip #$skippedCount: ${result.debugInfo.replace("\n", " | ")}")
-                swipeToNext {
-                    isProcessing = false
-                    if (isWorking) handler.postDelayed({ processCurrentScreen() }, 2000)
+                        if (isWorking) handler.postDelayed({ processCurrentScreen() }, 2000)
                 }
             }
         } catch (e: Exception) {
@@ -159,6 +159,29 @@ class DouyinAutoService : AccessibilityService() {
             val child = node.getChild(i) ?: continue
             collectNodesRecursive(child, nodes)
             child.recycle()
+        }
+    }
+
+    /** 截图用于像素分析（不保存） */
+    private fun captureForAnalysis(callback: (Bitmap?) -> Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(result: ScreenshotResult) {
+                        val bitmap = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                        val soft = bitmap?.copy(Bitmap.Config.ARGB_8888, false)
+                        bitmap?.recycle()
+                        result.hardwareBuffer.close()
+                        callback(soft)
+                    }
+                    override fun onFailure(errorCode: Int) {
+                        Log.e(TAG, "Analysis screenshot failed: $errorCode")
+                        callback(null)
+                    }
+                }
+            )
+        } else {
+            callback(null)
         }
     }
 
