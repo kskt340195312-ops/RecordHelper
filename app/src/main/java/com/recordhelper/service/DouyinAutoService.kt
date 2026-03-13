@@ -5,6 +5,7 @@ import android.accessibilityservice.GestureDescription
 import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.Path
+import android.graphics.Rect
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -52,10 +53,7 @@ class DouyinAutoService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-
-    override fun onInterrupt() {
-        Log.d(TAG, "Service interrupted")
-    }
+    override fun onInterrupt() { Log.d(TAG, "Service interrupted") }
 
     override fun onDestroy() {
         instance = null
@@ -98,8 +96,8 @@ class DouyinAutoService : AccessibilityService() {
                 return
             }
 
-            // 保存前3次的节点数据到文件，方便调试
-            if (skippedCount + savedCount < 3) {
+            // 保存前5次的节点数据到文件，方便调试
+            if (skippedCount + savedCount < 5) {
                 saveDebugNodes(nodeInfos)
             }
 
@@ -111,16 +109,16 @@ class DouyinAutoService : AccessibilityService() {
                 bitmap?.recycle()
 
                 if (result.meetsAllConditions) {
-                    Log.d(TAG, "✅ MATCH!")
+                    Log.d(TAG, "✅ MATCH! Starting profile flow for publish time")
                     handler.post {
-                        Toast.makeText(this, "✅ 已保存截图! 赞=${result.likeCount} 评=${result.commentCount}", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "✅ 符合条件! 正在获取发布时间...", Toast.LENGTH_SHORT).show()
                     }
-                    takeScreenshotAndSave {
+                    // 进主页 → 点视频 → 截图 → 返回
+                    navigateToProfileAndScreenshot {
                         savedCount++
-                        swipeToNext {
-                            isProcessing = false
-                            if (isWorking) handler.postDelayed({ processCurrentScreen() }, 3000)
-                        }
+                        // 返回到feed后继续
+                        isProcessing = false
+                        if (isWorking) handler.postDelayed({ processCurrentScreen() }, 3000)
                     }
                 } else {
                     skippedCount++
@@ -141,6 +139,283 @@ class DouyinAutoService : AccessibilityService() {
         }
     }
 
+    /**
+     * 进入作者主页 → 点击第一个视频 → 等待发布时间显示 → 截图 → 返回feed
+     *
+     * 流程：
+     * 1. 找到作者头像节点并点击 → 进入主页
+     * 2. 等待主页加载，找到视频列表中的第一个视频并点击
+     * 3. 等待视频加载（此时会显示发布时间）
+     * 4. 截图保存
+     * 5. 按返回键两次回到feed
+     */
+    private fun navigateToProfileAndScreenshot(onDone: () -> Unit) {
+        // Step 1: 点击作者头像
+        val avatarClicked = clickAuthorAvatar()
+        if (!avatarClicked) {
+            Log.w(TAG, "Could not find author avatar, taking screenshot directly")
+            takeScreenshotAndSave {
+                swipeToNext { onDone() }
+            }
+            return
+        }
+
+        // Step 2: 等待主页加载，然后点击第一个视频
+        handler.postDelayed({
+            if (!isWorking) { onDone(); return@postDelayed }
+
+            val videoClicked = clickFirstVideoInProfile()
+            if (!videoClicked) {
+                Log.w(TAG, "Could not find video in profile, going back and taking screenshot")
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                handler.postDelayed({
+                    takeScreenshotAndSave {
+                        swipeToNext { onDone() }
+                    }
+                }, 1500)
+                return@postDelayed
+            }
+
+            // Step 3: 等待视频加载（发布时间会显示）
+            handler.postDelayed({
+                if (!isWorking) { onDone(); return@postDelayed }
+
+                // Step 4: 截图
+                Log.d(TAG, "Taking screenshot with publish time visible")
+                handler.post {
+                    Toast.makeText(this, "📸 截图中（含发布时间）", Toast.LENGTH_SHORT).show()
+                }
+                takeScreenshotAndSave {
+                    // Step 5: 返回到feed — 按两次返回
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    handler.postDelayed({
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        handler.postDelayed({
+                            // 等一下让feed稳定，然后滑到下一个
+                            swipeToNext { onDone() }
+                        }, 1500)
+                    }, 1500)
+                }
+            }, 3000) // 等3秒让视频加载
+        }, 2500) // 等2.5秒让主页加载
+    }
+
+    /**
+     * 点击作者头像。
+     * 抖音视频页面右侧有作者头像，通常是一个圆形ImageView。
+     * 查找策略：
+     * - 找 contentDescription 包含"头像"的节点
+     * - 或者找右侧区域的 ImageView 节点（头像在右侧栏最上方）
+     */
+    private fun clickAuthorAvatar(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        try {
+            // 策略1: 找包含"头像"的节点
+            val avatarNode = findNodeByDescContains(root, "头像")
+            if (avatarNode != null) {
+                val clicked = clickNode(avatarNode)
+                avatarNode.recycle()
+                if (clicked) {
+                    Log.d(TAG, "Clicked avatar via desc '头像'")
+                    return true
+                }
+            }
+
+            // 策略2: 找包含"进入"+"主页"的节点
+            val profileNode = findNodeByDescContains(root, "主页")
+            if (profileNode != null) {
+                val clicked = clickNode(profileNode)
+                profileNode.recycle()
+                if (clicked) {
+                    Log.d(TAG, "Clicked avatar via desc '主页'")
+                    return true
+                }
+            }
+
+            // 策略3: 在右侧上方区域找可点击的ImageView
+            val dm = resources.displayMetrics
+            val screenW = dm.widthPixels
+            val screenH = dm.heightPixels
+            val rightAreaNode = findClickableImageInArea(
+                root,
+                left = (screenW * 0.80).toInt(),
+                top = (screenH * 0.20).toInt(),
+                right = screenW,
+                bottom = (screenH * 0.50).toInt()
+            )
+            if (rightAreaNode != null) {
+                val clicked = clickNode(rightAreaNode)
+                rightAreaNode.recycle()
+                if (clicked) {
+                    Log.d(TAG, "Clicked avatar via position (right side ImageView)")
+                    return true
+                }
+            }
+
+            return false
+        } finally {
+            root.recycle()
+        }
+    }
+
+    /**
+     * 在作者主页中点击第一个视频。
+     * 主页通常有一个视频网格，点击第一个即可。
+     * 查找策略：
+     * - 找 RecyclerView/ListView 中的第一个可点击项
+     * - 或者找屏幕中间区域的可点击 ImageView
+     */
+    private fun clickFirstVideoInProfile(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        try {
+            // 策略1: 找包含"作品"或"视频"标签附近的可点击元素
+            // 主页视频网格通常在屏幕中下部
+            val dm = resources.displayMetrics
+            val screenW = dm.widthPixels
+            val screenH = dm.heightPixels
+
+            // 找屏幕中间偏左上的可点击元素（第一个视频通常在这个位置）
+            val videoNode = findClickableInArea(
+                root,
+                left = 0,
+                top = (screenH * 0.40).toInt(),
+                right = (screenW * 0.55).toInt(),
+                bottom = (screenH * 0.75).toInt()
+            )
+            if (videoNode != null) {
+                val clicked = clickNode(videoNode)
+                videoNode.recycle()
+                if (clicked) {
+                    Log.d(TAG, "Clicked first video in profile")
+                    return true
+                }
+            }
+
+            // 策略2: 直接点击屏幕中间偏左的位置（视频网格第一个位置）
+            val tapX = screenW * 0.25f
+            val tapY = screenH * 0.55f
+            tapAt(tapX, tapY) {
+                Log.d(TAG, "Tapped at ($tapX, $tapY) for first video")
+            }
+            return true
+        } finally {
+            root.recycle()
+        }
+    }
+
+    // === 辅助方法：节点查找和点击 ===
+
+    private fun findNodeByDescContains(root: AccessibilityNodeInfo, keyword: String): AccessibilityNodeInfo? {
+        val desc = root.contentDescription?.toString() ?: ""
+        if (desc.contains(keyword)) return AccessibilityNodeInfo.obtain(root)
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i) ?: continue
+            val found = findNodeByDescContains(child, keyword)
+            if (found != null) {
+                child.recycle()
+                return found
+            }
+            child.recycle()
+        }
+        return null
+    }
+
+    private fun findClickableImageInArea(
+        root: AccessibilityNodeInfo, left: Int, top: Int, right: Int, bottom: Int
+    ): AccessibilityNodeInfo? {
+        val className = root.className?.toString() ?: ""
+        val rect = Rect()
+        root.getBoundsInScreen(rect)
+
+        if ((className.contains("ImageView") || className.contains("Image")) &&
+            rect.left >= left && rect.top >= top && rect.right <= right && rect.bottom <= bottom &&
+            (root.isClickable || root.parent?.isClickable == true)
+        ) {
+            return AccessibilityNodeInfo.obtain(root)
+        }
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i) ?: continue
+            val found = findClickableImageInArea(child, left, top, right, bottom)
+            if (found != null) {
+                child.recycle()
+                return found
+            }
+            child.recycle()
+        }
+        return null
+    }
+
+    private fun findClickableInArea(
+        root: AccessibilityNodeInfo, left: Int, top: Int, right: Int, bottom: Int
+    ): AccessibilityNodeInfo? {
+        val rect = Rect()
+        root.getBoundsInScreen(rect)
+
+        if (root.isClickable &&
+            rect.centerX() in left..right &&
+            rect.centerY() in top..bottom &&
+            rect.width() > 50 && rect.height() > 50
+        ) {
+            return AccessibilityNodeInfo.obtain(root)
+        }
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i) ?: continue
+            val found = findClickableInArea(child, left, top, right, bottom)
+            if (found != null) {
+                child.recycle()
+                return found
+            }
+            child.recycle()
+        }
+        return null
+    }
+
+    private fun clickNode(node: AccessibilityNodeInfo): Boolean {
+        // 先尝试直接点击
+        if (node.isClickable) {
+            return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        // 向上找可点击的父节点
+        var parent = node.parent
+        while (parent != null) {
+            if (parent.isClickable) {
+                val result = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                parent.recycle()
+                return result
+            }
+            val grandParent = parent.parent
+            parent.recycle()
+            parent = grandParent
+        }
+        // 都不行就用手势点击节点中心
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        if (rect.width() > 0 && rect.height() > 0) {
+            tapAt(rect.centerX().toFloat(), rect.centerY().toFloat()) {}
+            return true
+        }
+        return false
+    }
+
+    private fun tapAt(x: Float, y: Float, onDone: () -> Unit) {
+        val path = Path().apply {
+            moveTo(x, y)
+            lineTo(x, y)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
+            .build()
+        dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) { onDone() }
+            override fun onCancelled(gestureDescription: GestureDescription?) { onDone() }
+        }, handler)
+    }
+
+    // === 原有方法 ===
+
     /** 保存节点数据到文件用于调试 */
     private fun saveDebugNodes(nodes: List<NodeData>) {
         try {
@@ -153,7 +428,7 @@ class DouyinAutoService : AccessibilityService() {
                 if (n.contentDesc != null) sb.appendLine("    desc: ${n.contentDesc}")
             }
             val filename = "debug_nodes_$ts.txt"
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
                     put(MediaStore.Files.FileColumns.DISPLAY_NAME, filename)
                     put(MediaStore.Files.FileColumns.MIME_TYPE, "text/plain")

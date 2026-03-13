@@ -33,13 +33,11 @@ class ScreenAnalyzer {
         minComments: Int
     ): AnalyzeResult {
         val allTexts = nodeInfos.flatMap { listOfNotNull(it.text, it.contentDesc) }
-        val allDescs = nodeInfos.mapNotNull { it.contentDesc }
 
         // === 条件1: 绿标 - 像素检测 ===
         val hasGreenIcon = if (bitmap != null) detectGreenIcon(bitmap) else false
 
         // === 条件2: 团购文字 ===
-        // 从你的截图看，团购视频底部有 "优惠团购"、"X款团购低至X折"、"已售XX万+"
         val hasGroupBuyText = allTexts.any { text ->
             text.contains("团购") || text.contains("已售")
         }
@@ -50,54 +48,11 @@ class ScreenAnalyzer {
         }
 
         // === 提取互动数据 ===
-        var likeCount = 0L
-        var commentCount = 0L
-        var favoriteCount = 0L
-        var shareCount = 0L
-
-        // 从所有文本和描述中提取
-        for (info in nodeInfos) {
-            // 检查 contentDescription
-            info.contentDesc?.let { desc ->
-                extractCounts(desc)?.let { (type, count) ->
-                    when (type) {
-                        "like" -> if (likeCount == 0L) likeCount = count
-                        "comment" -> if (commentCount == 0L) commentCount = count
-                        "favorite" -> if (favoriteCount == 0L) favoriteCount = count
-                        "share" -> if (shareCount == 0L) shareCount = count
-                    }
-                }
-            }
-            // 检查 text
-            info.text?.let { text ->
-                extractCounts(text)?.let { (type, count) ->
-                    when (type) {
-                        "like" -> if (likeCount == 0L) likeCount = count
-                        "comment" -> if (commentCount == 0L) commentCount = count
-                        "favorite" -> if (favoriteCount == 0L) favoriteCount = count
-                        "share" -> if (shareCount == 0L) shareCount = count
-                    }
-                }
-            }
-        }
-
-        // 如果还没提取到，尝试从纯数字节点按顺序猜测
-        // 抖音右侧栏从上到下: 点赞、评论、收藏、转发
-        if (likeCount == 0L && commentCount == 0L) {
-            val pureNumbers = allTexts.mapNotNull { text ->
-                val trimmed = text.trim()
-                if (Regex("^[\\d.]+[万wW]?$").matches(trimmed)) {
-                    CountParser.parseLong(trimmed)
-                } else null
-            }.filter { it > 0 }
-
-            if (pureNumbers.size >= 4) {
-                likeCount = pureNumbers[0]
-                commentCount = pureNumbers[1]
-                favoriteCount = pureNumbers[2]
-                shareCount = pureNumbers[3]
-            }
-        }
+        val counts = extractAllCounts(nodeInfos)
+        val likeCount = counts.like
+        val commentCount = counts.comment
+        val favoriteCount = counts.favorite
+        val shareCount = counts.share
 
         val meetsComments = commentCount >= minComments
         val meetsRatio = checkRatio(likeCount, shareCount, ratioPercent)
@@ -109,6 +64,7 @@ class ScreenAnalyzer {
             appendLine("绿标=$hasGreenIcon 团购=$hasGroupBuyText 北京=$isBeijing")
             appendLine("赞=$likeCount 评=$commentCount 藏=$favoriteCount 转=$shareCount")
             appendLine("评论>=$minComments:$meetsComments 比例>=${ratioPercent}%:$meetsRatio")
+            appendLine("提取方式=${counts.method}")
             appendLine("结果=$meetsAll")
         }
         Log.d(TAG, debug)
@@ -126,19 +82,99 @@ class ScreenAnalyzer {
         )
     }
 
-    /** 从文本中提取互动数据类型和数量 */
-    private fun extractCounts(text: String): Pair<String, Long>? {
-        val lower = text.lowercase()
-        val num = CountParser.parseLong(text)
-        if (num <= 0) return null
+    private data class Counts(
+        val like: Long = 0,
+        val comment: Long = 0,
+        val favorite: Long = 0,
+        val share: Long = 0,
+        val method: String = "none"
+    )
 
+    /**
+     * 从节点中提取互动数据。
+     * 抖音的无障碍节点格式多种多样，常见的有：
+     * - contentDescription: "点赞，3785" / "评论，128" / "收藏，56" / "转发，89"
+     * - contentDescription: "3785赞" / "128评论"
+     * - text: "3785" (纯数字，无关键词)
+     *
+     * 策略：
+     * 1. 优先用带关键词的节点精确匹配
+     * 2. 不再使用纯数字猜测（这是之前出错的根源）
+     * 3. 如果无法确定评论数，返回0（宁可漏截不乱截）
+     */
+    private fun extractAllCounts(nodeInfos: List<NodeData>): Counts {
+        var like = 0L
+        var comment = 0L
+        var favorite = 0L
+        var share = 0L
+        val methods = mutableListOf<String>()
+
+        for (info in nodeInfos) {
+            val texts = listOfNotNull(info.text, info.contentDesc)
+            for (t in texts) {
+                val parsed = parseCountFromText(t) ?: continue
+                when (parsed.first) {
+                    "like" -> if (like == 0L) { like = parsed.second; methods.add("赞:$t") }
+                    "comment" -> if (comment == 0L) { comment = parsed.second; methods.add("评:$t") }
+                    "favorite" -> if (favorite == 0L) { favorite = parsed.second; methods.add("藏:$t") }
+                    "share" -> if (share == 0L) { share = parsed.second; methods.add("转:$t") }
+                }
+            }
+        }
+
+        return Counts(like, comment, favorite, share, methods.joinToString("; ").ifEmpty { "none" })
+    }
+
+    /**
+     * 从单条文本中解析互动类型和数量。
+     * 支持格式：
+     * - "点赞，3785" / "点赞,3785" / "点赞 3785"
+     * - "评论，128" / "评论,128"
+     * - "收藏，56" / "收藏,56"
+     * - "转发，89" / "分享，89"
+     * - "3785赞" / "128评论" / "56收藏" / "89转发"
+     * - "喜欢，3785"
+     * - "已点赞，3785"
+     * - 不处理纯数字（避免误判）
+     */
+    private fun parseCountFromText(text: String): Pair<String, Long>? {
+        val t = text.trim()
+        if (t.isEmpty()) return null
+
+        // 格式1: "关键词[分隔符]数字" — 如 "点赞，3785" "评论,128" "收藏 1.2万"
+        val prefixPattern = Regex("(点赞|已点赞|赞|喜欢|like|评论|comment|收藏|favorite|转发|分享|share)[，,\\s:：]+(.+)", RegexOption.IGNORE_CASE)
+        prefixPattern.find(t)?.let { m ->
+            val keyword = m.groupValues[1].lowercase()
+            val numStr = m.groupValues[2].trim()
+            val num = CountParser.parseLong(numStr)
+            if (num > 0) {
+                val type = classifyKeyword(keyword) ?: return null
+                return type to num
+            }
+        }
+
+        // 格式2: "数字+关键词" — 如 "3785赞" "128评论"
+        val suffixPattern = Regex("([\\d.]+[万wW]?)\\s*(点赞|赞|喜欢|评论|收藏|转发|分享)", RegexOption.IGNORE_CASE)
+        suffixPattern.find(t)?.let { m ->
+            val numStr = m.groupValues[1]
+            val keyword = m.groupValues[2].lowercase()
+            val num = CountParser.parseLong(numStr)
+            if (num > 0) {
+                val type = classifyKeyword(keyword) ?: return null
+                return type to num
+            }
+        }
+
+        // 不处理纯数字 — 这是之前出错的根源
+        return null
+    }
+
+    private fun classifyKeyword(keyword: String): String? {
         return when {
-            (lower.contains("赞") || lower.contains("喜欢") || lower.contains("like"))
-                && !lower.contains("评") && !lower.contains("收") -> "like" to num
-            lower.contains("评论") || lower.contains("comment") -> "comment" to num
-            lower.contains("收藏") || lower.contains("favorite") -> "favorite" to num
-            (lower.contains("转发") || lower.contains("分享") || lower.contains("share"))
-                && !lower.contains("收") -> "share" to num
+            keyword.contains("赞") || keyword.contains("喜欢") || keyword.contains("like") -> "like"
+            keyword.contains("评论") || keyword.contains("comment") -> "comment"
+            keyword.contains("收藏") || keyword.contains("favorite") -> "favorite"
+            keyword.contains("转发") || keyword.contains("分享") || keyword.contains("share") -> "share"
             else -> null
         }
     }
@@ -147,7 +183,6 @@ class ScreenAnalyzer {
     private fun detectGreenIcon(bitmap: Bitmap): Boolean {
         val w = bitmap.width
         val h = bitmap.height
-        // 扫描范围：左侧0~15%, 高度60%~90%（绿标在左下角）
         val scanXEnd = (w * 0.15).toInt()
         val scanYStart = (h * 0.60).toInt()
         val scanYEnd = (h * 0.90).toInt()
