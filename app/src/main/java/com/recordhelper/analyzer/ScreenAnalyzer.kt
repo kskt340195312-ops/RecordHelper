@@ -32,39 +32,34 @@ class ScreenAnalyzer {
         ratioPercent: Int,
         minComments: Int
     ): AnalyzeResult {
-        val allTexts = nodeInfos.flatMap { listOfNotNull(it.text, it.contentDesc) }
+        // === 找到当前视频的节点范围 ===
+        // 抖音同城页面会同时加载多个视频的节点
+        // 当前播放的视频有 "暂停视频" 标记，已暂停的有 "播放视频"
+        // 我们需要找到当前视频对应的那组互动数据
+        val videoSegment = findCurrentVideoSegment(nodeInfos)
+        val segmentTexts = videoSegment.flatMap { listOfNotNull(it.text, it.contentDesc) }
 
         // === 条件1: 绿标 - 像素检测 ===
         val hasGreenIcon = if (bitmap != null) detectGreenIcon(bitmap) else false
 
-        // === 条件2: 团购文字 ===
-        val hasGroupBuyText = allTexts.any { text ->
-            text.contains("团购") || text.contains("已售")
-        }
+        // === 条件2: 团购文字 — 只在当前视频段落中查找 ===
+        val hasGroupBuyText = segmentTexts.any { it.contains("团购") || it.contains("已售") }
 
-        // === 条件3: 北京地区 ===
-        val isBeijing = allTexts.any { text ->
-            text.contains("北京")
-        }
+        // === 条件3: 北京地区 — 只在当前视频段落中查找 ===
+        val isBeijing = segmentTexts.any { it.contains("北京") }
 
-        // === 提取互动数据 ===
-        val counts = extractAllCounts(nodeInfos)
-        val likeCount = counts.like
-        val commentCount = counts.comment
-        val favoriteCount = counts.favorite
-        val shareCount = counts.share
+        // === 提取互动数据 — 只从当前视频段落提取 ===
+        val counts = extractCountsFromSegment(videoSegment)
 
-        val meetsComments = commentCount >= minComments
-        val meetsRatio = checkRatio(likeCount, shareCount, ratioPercent)
-
-        // 条件: 绿标 + 团购文字 + 北京 + 评论数 + 比例
+        val meetsComments = counts.comment >= minComments
+        val meetsRatio = checkRatio(counts.like, counts.share, ratioPercent)
         val meetsAll = hasGreenIcon && hasGroupBuyText && isBeijing && meetsComments && meetsRatio
 
         val debug = buildString {
             appendLine("绿标=$hasGreenIcon 团购=$hasGroupBuyText 北京=$isBeijing")
-            appendLine("赞=$likeCount 评=$commentCount 藏=$favoriteCount 转=$shareCount")
+            appendLine("赞=${counts.like} 评=${counts.comment} 藏=${counts.favorite} 转=${counts.share}")
             appendLine("评论>=$minComments:$meetsComments 比例>=${ratioPercent}%:$meetsRatio")
-            appendLine("提取方式=${counts.method}")
+            appendLine("段落节点数=${videoSegment.size}/${nodeInfos.size} 方式=${counts.method}")
             appendLine("结果=$meetsAll")
         }
         Log.d(TAG, debug)
@@ -72,10 +67,10 @@ class ScreenAnalyzer {
         return AnalyzeResult(
             hasGreenIcon = hasGreenIcon,
             hasGroupBuyText = hasGroupBuyText,
-            likeCount = likeCount,
-            commentCount = commentCount,
-            favoriteCount = favoriteCount,
-            shareCount = shareCount,
+            likeCount = counts.like,
+            commentCount = counts.comment,
+            favoriteCount = counts.favorite,
+            shareCount = counts.share,
             isBeijing = isBeijing,
             meetsAllConditions = meetsAll,
             debugInfo = debug
@@ -91,34 +86,123 @@ class ScreenAnalyzer {
     )
 
     /**
-     * 从节点中提取互动数据。
-     * 抖音的无障碍节点格式多种多样，常见的有：
-     * - contentDescription: "点赞，3785" / "评论，128" / "收藏，56" / "转发，89"
-     * - contentDescription: "3785赞" / "128评论"
-     * - text: "3785" (纯数字，无关键词)
+     * 找到当前正在播放的视频对应的节点段落。
      *
-     * 策略：
-     * 1. 优先用带关键词的节点精确匹配
-     * 2. 不再使用纯数字猜测（这是之前出错的根源）
-     * 3. 如果无法确定评论数，返回0（宁可漏截不乱截）
+     * 抖音同城页面的节点结构（从debug_nodes确认）：
+     * 每个视频有一组节点：关注按钮、头像、喜欢、评论、收藏、分享、音乐、作者名、描述文字
+     * 视频之间用 "暂停视频/播放视频" 节点分隔
+     *
+     * 策略：找到 "暂停视频" 节点（当前正在播放的），然后向前找到该视频的互动数据。
+     * 如果找不到 "暂停视频"，就用第一组互动数据。
      */
-    private fun extractAllCounts(nodeInfos: List<NodeData>): Counts {
+    private fun findCurrentVideoSegment(nodeInfos: List<NodeData>): List<NodeData> {
+        // 找所有 "喜欢" 节点的位置 — 每个视频都有一个 "喜欢XXX" 的 LinearLayout
+        val likeIndices = mutableListOf<Int>()
+        for (i in nodeInfos.indices) {
+            val desc = nodeInfos[i].contentDesc ?: ""
+            if (desc.contains("喜欢") && desc.contains("按钮")) {
+                likeIndices.add(i)
+            }
+        }
+
+        if (likeIndices.isEmpty()) return nodeInfos // fallback: 用全部节点
+
+        // 找 "暂停视频" 节点 — 表示当前正在播放的视频
+        var playingIndex = -1
+        for (i in nodeInfos.indices) {
+            val desc = nodeInfos[i].contentDesc ?: ""
+            if (desc.contains("暂停视频")) {
+                playingIndex = i
+                break
+            }
+        }
+
+        // 确定当前视频的 "喜欢" 节点
+        var targetLikeIndex: Int
+        if (playingIndex >= 0) {
+            // 找 "暂停视频" 之前最近的 "喜欢" 节点
+            targetLikeIndex = likeIndices.lastOrNull { it < playingIndex } ?: likeIndices[0]
+        } else {
+            // 没找到 "暂停视频"，用第一个
+            targetLikeIndex = likeIndices[0]
+        }
+
+        // 确定段落范围：从 "喜欢" 节点往前找到 "关注" 按钮，往后找到下一个 "喜欢" 或文件末尾
+        val segStart = findSegmentStart(nodeInfos, targetLikeIndex)
+        val segEnd = if (likeIndices.indexOf(targetLikeIndex) < likeIndices.size - 1) {
+            val nextLike = likeIndices[likeIndices.indexOf(targetLikeIndex) + 1]
+            // 往前找到 "关注" 按钮
+            findSegmentStart(nodeInfos, nextLike)
+        } else {
+            nodeInfos.size
+        }
+
+        Log.d(TAG, "Video segment: [$segStart, $segEnd) likeAt=$targetLikeIndex playingAt=$playingIndex")
+        return nodeInfos.subList(segStart, minOf(segEnd, nodeInfos.size))
+    }
+
+    private fun findSegmentStart(nodeInfos: List<NodeData>, likeIndex: Int): Int {
+        // 从 "喜欢" 节点往前找，找到 "关注" 按钮或 ViewPager
+        for (i in likeIndex downTo 0) {
+            val desc = nodeInfos[i].contentDesc ?: ""
+            if (desc == "关注" || desc.contains("关注，按钮")) return i
+            // ViewPager 是视频容器的标志
+            if (nodeInfos[i].className?.contains("ViewPager") == true) return i
+        }
+        return 0
+    }
+
+    /**
+     * 从一个视频段落的节点中提取互动数据。
+     *
+     * 抖音实际节点格式（从debug_nodes确认）：
+     * - desc: "未点赞，喜欢3393，按钮"  → like=3393
+     * - desc: "未点赞，喜欢1.5万，按钮" → like=15000
+     * - desc: "评论1485，按钮"          → comment=1485
+     * - desc: "评论评论，按钮"          → comment=0 (无评论时)
+     * - desc: "未选中，收藏781，按钮"   → favorite=781
+     * - desc: "分享292，按钮"           → share=292
+     * - desc: "分享，按钮"              → share=0 (无分享时)
+     */
+    private fun extractCountsFromSegment(segment: List<NodeData>): Counts {
         var like = 0L
         var comment = 0L
         var favorite = 0L
         var share = 0L
         val methods = mutableListOf<String>()
 
-        for (info in nodeInfos) {
-            val texts = listOfNotNull(info.text, info.contentDesc)
-            for (t in texts) {
-                val parsed = parseCountFromText(t) ?: continue
-                when (parsed.first) {
-                    "like" -> if (like == 0L) { like = parsed.second; methods.add("赞:$t") }
-                    "comment" -> if (comment == 0L) { comment = parsed.second; methods.add("评:$t") }
-                    "favorite" -> if (favorite == 0L) { favorite = parsed.second; methods.add("藏:$t") }
-                    "share" -> if (share == 0L) { share = parsed.second; methods.add("转:$t") }
-                }
+        for (info in segment) {
+            val desc = info.contentDesc ?: continue
+
+            // 喜欢/点赞: "未点赞，喜欢3393，按钮" 或 "已点赞，喜欢3393，按钮"
+            if (like == 0L && desc.contains("喜欢")) {
+                val num = extractNumberAfterKeyword(desc, "喜欢")
+                if (num > 0) { like = num; methods.add("赞:$desc") }
+            }
+
+            // 评论: "评论1485，按钮" — 注意 "评论评论" 表示0条评论
+            if (comment == 0L && desc.contains("评论") && !desc.contains("喜欢") && !desc.contains("收藏") && !desc.contains("分享")) {
+                val num = extractNumberAfterKeyword(desc, "评论")
+                if (num > 0) { comment = num; methods.add("评:$desc") }
+                // "评论评论" 或 "评论，按钮" 表示0条，不设置
+            }
+
+            // 收藏: "未选中，收藏781，按钮"
+            if (favorite == 0L && desc.contains("收藏")) {
+                val num = extractNumberAfterKeyword(desc, "收藏")
+                if (num > 0) { favorite = num; methods.add("藏:$desc") }
+            }
+
+            // 分享: "分享292，按钮"
+            if (share == 0L && desc.contains("分享") && !desc.contains("收藏")) {
+                val num = extractNumberAfterKeyword(desc, "分享")
+                if (num > 0) { share = num; methods.add("转:$desc") }
+            }
+
+            // 转发: 有些版本用"转发"而不是"分享"
+            if (share == 0L && desc.contains("转发")) {
+                val num = extractNumberAfterKeyword(desc, "转发")
+                if (num > 0) { share = num; methods.add("转:$desc") }
             }
         }
 
@@ -126,57 +210,16 @@ class ScreenAnalyzer {
     }
 
     /**
-     * 从单条文本中解析互动类型和数量。
-     * 支持格式：
-     * - "点赞，3785" / "点赞,3785" / "点赞 3785"
-     * - "评论，128" / "评论,128"
-     * - "收藏，56" / "收藏,56"
-     * - "转发，89" / "分享，89"
-     * - "3785赞" / "128评论" / "56收藏" / "89转发"
-     * - "喜欢，3785"
-     * - "已点赞，3785"
-     * - 不处理纯数字（避免误判）
+     * 从文本中提取关键词后面的数字。
+     * 例如: "喜欢3393" → 3393, "喜欢1.5万" → 15000, "评论评论" → 0
      */
-    private fun parseCountFromText(text: String): Pair<String, Long>? {
-        val t = text.trim()
-        if (t.isEmpty()) return null
-
-        // 格式1: "关键词[分隔符]数字" — 如 "点赞，3785" "评论,128" "收藏 1.2万"
-        val prefixPattern = Regex("(点赞|已点赞|赞|喜欢|like|评论|comment|收藏|favorite|转发|分享|share)[，,\\s:：]+(.+)", RegexOption.IGNORE_CASE)
-        prefixPattern.find(t)?.let { m ->
-            val keyword = m.groupValues[1].lowercase()
-            val numStr = m.groupValues[2].trim()
-            val num = CountParser.parseLong(numStr)
-            if (num > 0) {
-                val type = classifyKeyword(keyword) ?: return null
-                return type to num
-            }
-        }
-
-        // 格式2: "数字+关键词" — 如 "3785赞" "128评论"
-        val suffixPattern = Regex("([\\d.]+[万wW]?)\\s*(点赞|赞|喜欢|评论|收藏|转发|分享)", RegexOption.IGNORE_CASE)
-        suffixPattern.find(t)?.let { m ->
-            val numStr = m.groupValues[1]
-            val keyword = m.groupValues[2].lowercase()
-            val num = CountParser.parseLong(numStr)
-            if (num > 0) {
-                val type = classifyKeyword(keyword) ?: return null
-                return type to num
-            }
-        }
-
-        // 不处理纯数字 — 这是之前出错的根源
-        return null
-    }
-
-    private fun classifyKeyword(keyword: String): String? {
-        return when {
-            keyword.contains("赞") || keyword.contains("喜欢") || keyword.contains("like") -> "like"
-            keyword.contains("评论") || keyword.contains("comment") -> "comment"
-            keyword.contains("收藏") || keyword.contains("favorite") -> "favorite"
-            keyword.contains("转发") || keyword.contains("分享") || keyword.contains("share") -> "share"
-            else -> null
-        }
+    private fun extractNumberAfterKeyword(text: String, keyword: String): Long {
+        val idx = text.indexOf(keyword)
+        if (idx < 0) return 0
+        val after = text.substring(idx + keyword.length)
+        // 提取紧跟关键词后面的数字（可能有分隔符）
+        val numMatch = Regex("[，,\\s]*([\\d.]+[万wW]?)").find(after) ?: return 0
+        return CountParser.parseLong(numMatch.groupValues[1])
     }
 
     /** 检测绿标 - 屏幕左下区域的绿色定位图标 */
