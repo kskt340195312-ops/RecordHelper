@@ -89,7 +89,6 @@ class DouyinAutoService : AccessibilityService() {
         isProcessing = true
 
         try {
-            // 1. 收集屏幕文本节点
             val nodeInfos = collectScreenNodes()
             Log.d(TAG, "Collected ${nodeInfos.size} nodes")
 
@@ -99,20 +98,22 @@ class DouyinAutoService : AccessibilityService() {
                 return
             }
 
-            // 2. 先截图用于像素分析（检测绿标和小圆点）
+            // 保存前3次的节点数据到文件，方便调试
+            if (skippedCount + savedCount < 3) {
+                saveDebugNodes(nodeInfos)
+            }
+
             captureForAnalysis { bitmap ->
                 val ratioPercent = AppSettings.getRatioPercent(this)
                 val minComments = AppSettings.getMinComments(this)
-
-                // 3. 综合分析：文本 + 像素
                 val result = analyzer.analyze(nodeInfos, bitmap, ratioPercent, minComments)
                 lastDebugInfo = result.debugInfo
                 bitmap?.recycle()
 
                 if (result.meetsAllConditions) {
-                    Log.d(TAG, "✅ MATCH! Saving screenshot")
+                    Log.d(TAG, "✅ MATCH!")
                     handler.post {
-                        Toast.makeText(this, "✅ 发现符合条件的视频!", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "✅ 已保存截图! 赞=${result.likeCount} 评=${result.commentCount}", Toast.LENGTH_SHORT).show()
                     }
                     takeScreenshotAndSave {
                         savedCount++
@@ -123,7 +124,10 @@ class DouyinAutoService : AccessibilityService() {
                     }
                 } else {
                     skippedCount++
-                    Log.d(TAG, "❌ Skip #$skippedCount")
+                    Log.d(TAG, "❌ Skip #$skippedCount: ${result.debugInfo.trim()}")
+                    handler.post {
+                        Toast.makeText(this, "跳过#$skippedCount: ${result.debugInfo.lines().first()}", Toast.LENGTH_SHORT).show()
+                    }
                     swipeToNext {
                         isProcessing = false
                         if (isWorking) handler.postDelayed({ processCurrentScreen() }, 2000)
@@ -134,6 +138,36 @@ class DouyinAutoService : AccessibilityService() {
             Log.e(TAG, "Error processing screen", e)
             isProcessing = false
             if (isWorking) handler.postDelayed({ processCurrentScreen() }, 3000)
+        }
+    }
+
+    /** 保存节点数据到文件用于调试 */
+    private fun saveDebugNodes(nodes: List<NodeData>) {
+        try {
+            val ts = SimpleDateFormat("HHmmss", Locale.CHINA).format(Date())
+            val sb = StringBuilder()
+            sb.appendLine("=== Nodes at $ts ===")
+            nodes.forEachIndexed { i, n ->
+                sb.appendLine("[$i] class=${n.className}")
+                if (n.text != null) sb.appendLine("    text: ${n.text}")
+                if (n.contentDesc != null) sb.appendLine("    desc: ${n.contentDesc}")
+            }
+            val filename = "debug_nodes_$ts.txt"
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Files.FileColumns.DISPLAY_NAME, filename)
+                    put(MediaStore.Files.FileColumns.MIME_TYPE, "text/plain")
+                    put(MediaStore.Files.FileColumns.RELATIVE_PATH, "Documents/RecordHelper")
+                }
+                contentResolver.insert(MediaStore.Files.getContentUri("external"), values)?.let { uri ->
+                    contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(sb.toString().toByteArray())
+                    }
+                }
+            }
+            Log.d(TAG, "Debug nodes saved: $filename")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save debug nodes", e)
         }
     }
 
