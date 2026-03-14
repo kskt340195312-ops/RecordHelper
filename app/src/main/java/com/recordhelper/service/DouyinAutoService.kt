@@ -92,7 +92,7 @@ class DouyinAutoService : AccessibilityService() {
 
             if (nodeInfos.isEmpty()) {
                 isProcessing = false
-                if (isWorking) handler.postDelayed({ processCurrentScreen() }, 3000)
+                if (isWorking) handler.postDelayed({ processCurrentScreen() }, 1000)
                 return
             }
 
@@ -116,9 +116,8 @@ class DouyinAutoService : AccessibilityService() {
                     // 进主页 → 点视频 → 截图 → 返回
                     navigateToProfileAndScreenshot {
                         savedCount++
-                        // 返回到feed后继续
                         isProcessing = false
-                        if (isWorking) handler.postDelayed({ processCurrentScreen() }, 3000)
+                        if (isWorking) handler.postDelayed({ processCurrentScreen() }, 1500)
                     }
                 } else {
                     skippedCount++
@@ -128,7 +127,7 @@ class DouyinAutoService : AccessibilityService() {
                     }
                     swipeToNext {
                         isProcessing = false
-                        if (isWorking) handler.postDelayed({ processCurrentScreen() }, 2000)
+                        if (isWorking) handler.postDelayed({ processCurrentScreen() }, 800)
                     }
                 }
             }
@@ -505,15 +504,15 @@ class DouyinAutoService : AccessibilityService() {
         }
 
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 300))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 200))
             .build()
 
         dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
-                handler.postDelayed(onDone, 1500)
+                handler.postDelayed(onDone, 800)
             }
             override fun onCancelled(gestureDescription: GestureDescription?) {
-                handler.postDelayed(onDone, 1000)
+                handler.postDelayed(onDone, 500)
             }
         }, handler)
     }
